@@ -1,6 +1,7 @@
 import os, sys, queue, threading, collections, time
 import numpy as np
 from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -27,12 +28,17 @@ import whisper
 import torch
 
 
+# ── Paths ─────────────────────────────────────────────────────────────────────
+ROOT_DIR = Path(__file__).parent.parent   # VOICE_REAL_TIME/
+LOG_DIR  = ROOT_DIR / "lecture"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
 # ── Config ────────────────────────────────────────────────────────────────────
 WHISPER_MODEL  = os.getenv("WHISPER_MODEL",  "medium")
 SAMPLE_RATE    = int(os.getenv("SAMPLE_RATE", "16000"))
 LANGUAGE       = os.getenv("LANGUAGE", "vi")
-LOG_FILE       = os.getenv("LOG_FILE",
-    f"lecture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+LOG_FILE       = str(LOG_DIR / os.getenv("LOG_FILE",
+    f"lecture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"))
 MAX_QUEUE      = int(os.getenv("MAX_QUEUE_SIZE", "6"))
 CONTEXT_WIN    = int(os.getenv("CONTEXT_WINDOW", "4"))
 BEAM_SIZE      = int(os.getenv("BEAM_SIZE", "5"))
@@ -132,6 +138,7 @@ def stt_worker(model):
 
         try:
             dur = len(audio) / SAMPLE_RATE
+
             prompt = " ".join(_recent) if _recent else None
 
             res = model.transcribe(
@@ -266,16 +273,16 @@ def make_callback(thresh: float):
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     dev = f"GPU:{torch.cuda.get_device_name(0)}" if USE_GPU else "CPU"
-    print(f"\n{C.CY}{C.BOLD}  Lecture Transcriber v6"
+    print(f"\n{C.CY}{C.BOLD}  Lecture Transcriber"
           f"\n  Model:{WHISPER_MODEL}  Lang:{LANGUAGE}  Device:{dev}"
-          f"\n  Nhan Enter de dung{C.R}\n")
+          f"\n  Nhấn ENTER để dừng{C.R}\n")
 
     thresh = calibrate()
     init_log(thresh)
 
-    print(f"{C.YL}Dang tai Whisper {WHISPER_MODEL}...{C.R}", flush=True)
+    print(f"{C.YL}Đang tải Whisper {WHISPER_MODEL}...{C.R}", flush=True)
     model = whisper.load_model(WHISPER_MODEL, device="cuda" if USE_GPU else "cpu")
-    print(f"{C.GR}OK — Noi gi do, xem [DBG] no_speech va logprob.{C.R}")
+    print(f"{C.GR}OK — Nói gì đó, xem [DBG] no_speech va logprob.{C.R}")
     print(f"{C.DIM}  Ghi khi: no_speech < {NO_SPEECH_THRESH}  va  logprob > {LOGPROB_THRESH}{C.R}\n")
 
     worker = threading.Thread(target=stt_worker, args=(model,), daemon=False)
@@ -289,10 +296,10 @@ def main():
         while not _stop.is_set():
             time.sleep(0.05)
 
-    print(f"\n{C.YL}Dung. Cho xu ly xong...{C.R}")
+    print(f"\n{C.YL}Đừng, chờ xử lý xong...{C.R}")
     _audio_q.put(None)
     worker.join(timeout=120)
-    print(f"{C.GR}Da luu: {LOG_FILE}{C.R}\n")
+    print(f"{C.GR}Đã lưu: {LOG_FILE}{C.R}\n")
 
 
 if __name__ == "__main__":

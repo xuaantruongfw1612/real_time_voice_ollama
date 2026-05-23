@@ -3,7 +3,7 @@
 > Real-time Vietnamese speech-to-text for lectures, with an offline LLM polish pass.
 
 <p align="right">
-  🌐 <a href="README.vi.md">Đọc bằng tiếng Việt</a>
+  🌐 <a href="i18n/README.vi.md">Đọc bằng tiếng Việt</a>
 </p>
 
 ---
@@ -147,7 +147,7 @@ Auto-created and updated. You can also edit it manually at any time:
 
 ```
 # Format: wrong -> correct  (one pair per line)
-huyền thoại -> huyền thoại
+huyền thại -> huyền thoại
 whisper -> Whisper
 ```
 

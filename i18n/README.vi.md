@@ -3,7 +3,7 @@
 > Nhận diện giọng nói tiếng Việt theo thời gian thực cho bài giảng, kết hợp với LLM offline để làm sạch transcript.
 
 <p align="right">
-  🌐 <a href="README.md">Read in English</a>
+  🌐 <a href="../README.md">Read in English</a>
 </p>
 
 ---
@@ -147,7 +147,7 @@ Tự tạo và cập nhật. Có thể sửa tay bất cứ lúc nào:
 
 ```
 # Định dạng: sai -> đúng  (mỗi dòng 1 cặp)
-huyền thoại -> huyền thoại
+huyền thại -> huyền thoại
 whisper -> Whisper
 ```
 

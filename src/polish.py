@@ -18,12 +18,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── Paths ───────────────────────────────────────────────────────────────────
+ROOT_DIR  = Path(__file__).parent.parent   # VOICE_REAL_TIME/
+LOG_DIR   = ROOT_DIR / "lecture"
+
 # ── Config ─────────────────────────────────────────────────────────────────
 OLLAMA_MODEL   = os.getenv("OLLAMA_MODEL",   "gemma3:4b")
 OLLAMA_URL     = os.getenv("OLLAMA_URL",     "http://localhost:11434")
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "120"))
 OLLAMA_BOOT    = int(os.getenv("OLLAMA_BOOT_SEC", "15"))
-DICT_FILE      = Path(os.getenv("DICT_FILE", "dictionary.txt"))
+DICT_FILE      = Path(os.getenv("DICT_FILE", str(ROOT_DIR / "dictionary.txt")))
 
 
 class C:
@@ -197,7 +201,7 @@ def polish_line(raw: str, d: dict[str, str]) -> tuple[str, list[dict]]:
 def find_latest_log() -> Path | None:
     # bỏ qua file _polished để không đọc nhầm
     logs = sorted(
-        [p for p in Path(".").glob("lecture_*.txt") if "_polished" not in p.name],
+        [p for p in LOG_DIR.glob("lecture_*.txt") if "_polished" not in p.name],
         key=lambda p: p.stat().st_mtime,
     )
     return logs[-1] if logs else None
@@ -248,7 +252,7 @@ def main():
     else:
         log_path = find_latest_log()
         if not log_path:
-            print(f"  {C.RD}Không tìm thấy file lecture_*.txt nào.{C.R}")
+            print(f"  {C.RD}Không tìm thấy file lecture_*.txt nào trong {LOG_DIR}{C.R}")
             sys.exit(1)
         print(f"  File log:  {C.CY}{log_path}{C.R}")
 
