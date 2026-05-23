@@ -1,6 +1,0 @@
-BUOI HOC : 2026-05-23 14:58:52
-Model    : Whisper tiny  |  Ngon ngu: vi
-GPU/fp16 : False
-=======================================================
-
-[14:59:10] Xin chào tôi là xuân chủng tôi đến từ bên nâng

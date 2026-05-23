@@ -1,4 +1,4 @@
-import os, sys, queue, threading, collections
+import os, sys, queue, threading, collections, time
 import numpy as np
 from datetime import datetime
 from dotenv import load_dotenv
@@ -6,23 +6,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-# ── Kiem tra thu vien ─────────────────────────────────────────────────────────
 def check_imports():
     missing = []
     for pkg, imp in [
-        ("sounddevice", "sounddevice"),
-        ("numpy", "numpy"),
+        ("sounddevice",    "sounddevice"),
+        ("numpy",          "numpy"),
         ("openai-whisper", "whisper"),
-        ("python-dotenv", "dotenv"),
+        ("python-dotenv",  "dotenv"),
     ]:
-        try:
-            __import__(imp)
-        except ImportError:
-            missing.append(pkg)
+        try: __import__(imp)
+        except ImportError: missing.append(pkg)
     if missing:
         print(f"Thieu: pip install {' '.join(missing)}")
         sys.exit(1)
-
 
 check_imports()
 
@@ -31,204 +27,272 @@ import whisper
 import torch
 
 
-# ── Cau hinh ─────────────────────────────────────────────────────────────────
-WHISPER_MODEL  = os.getenv("WHISPER_MODEL",    "small")
-SAMPLE_RATE    = int(os.getenv("SAMPLE_RATE",      "16000"))
-SILENCE_THRESH = float(os.getenv("SILENCE_THRESH",  "0.006"))
-SILENCE_SEC    = float(os.getenv("SILENCE_SEC",     "1.5"))
-MIN_SPEECH_SEC = float(os.getenv("MIN_SPEECH_SEC",  "0.5"))
-LANGUAGE       = os.getenv("LANGUAGE", "vi")        # vi | en | auto
+# ── Config ────────────────────────────────────────────────────────────────────
+WHISPER_MODEL  = os.getenv("WHISPER_MODEL",  "medium")
+SAMPLE_RATE    = int(os.getenv("SAMPLE_RATE", "16000"))
+LANGUAGE       = os.getenv("LANGUAGE", "vi")
 LOG_FILE       = os.getenv("LOG_FILE",
     f"lecture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+MAX_QUEUE      = int(os.getenv("MAX_QUEUE_SIZE", "6"))
+CONTEXT_WIN    = int(os.getenv("CONTEXT_WINDOW", "4"))
+BEAM_SIZE      = int(os.getenv("BEAM_SIZE", "5"))
+SILENCE_SEC    = float(os.getenv("SILENCE_SEC",    "1.0"))
+MIN_SPEECH_SEC = float(os.getenv("MIN_SPEECH_SEC", "0.4"))
+CALIBRATE_SEC  = float(os.getenv("CALIBRATE_SEC",  "2.0"))
+RMS_SMOOTH     = int(os.getenv("RMS_SMOOTH_BLOCKS", "4"))
 
-MAX_QUEUE_SIZE = int(os.getenv("MAX_QUEUE_SIZE", "8"))
+# Hallucination filter — 2 nguong cua Whisper:
+# no_speech_prob > 0.6  : Whisper nghi doan nay la im lang / nhieu
+# avg_logprob   < -1.0  : Whisper khong tu tin vao ket qua
+NO_SPEECH_THRESH = float(os.getenv("NO_SPEECH_THRESH", "0.6"))
+LOGPROB_THRESH   = float(os.getenv("LOGPROB_THRESH",  "-1.0"))
 
-CONTEXT_WINDOW = int(os.getenv("CONTEXT_WINDOW", "3"))
+_te = os.getenv("SILENCE_THRESH", "").strip()
+FORCE_THRESH = float(_te) if _te else None
 
-ENERGY_SMOOTH  = int(os.getenv("ENERGY_SMOOTH", "3"))
+USE_GPU  = torch.cuda.is_available()
+USE_FP16 = USE_GPU
 
-# Auto-detect fp16
-USE_FP16 = torch.cuda.is_available()
-
-SKIP = {
-    "", ".", " ", "..", "...",
-    "cảm ơn", "cảm ơn bạn", "cảm ơn bạn đã xem", "xin cảm ơn",
-    "bye", "thank you", "thanks", "okay", "ok",
-    "[blank_audio]", "(blank)", "(nhạc)", "(tiếng nhạc)",
+# Chuoi Whisper hay hallucinate — filter them tang thu 2
+HALLUC_STRINGS = {
+    "ghiền mì gõ", "subscribe", "like và subscribe",
+    "đăng ký kênh", "cảm ơn các bạn đã xem",
+    "xin chào các bạn", "hẹn gặp lại",
 }
 
 
 class C:
-    RESET  = "\033[0m";  BOLD   = "\033[1m"
-    GREEN  = "\033[92m"; CYAN   = "\033[96m"
-    GRAY   = "\033[90m"; YELLOW = "\033[93m"
-    RED    = "\033[91m"
+    R="\033[0m"; BOLD="\033[1m"; DIM="\033[2m"
+    GR="\033[92m"; CY="\033[96m"; YL="\033[93m"
+    RD="\033[91m"; GY="\033[90m"
 
 
-# ── Thread-safe printing ──────────────────────────────────────────────────────
-_print_lock   = threading.Lock()
-_amp_suppress = threading.Event()   # set = dang in transcript, khong in amp
+_lock     = threading.Lock()
+_suppress = threading.Event()
+_stop     = threading.Event()
+_audio_q  = queue.Queue(maxsize=MAX_QUEUE)
+_recent   = collections.deque(maxlen=CONTEXT_WIN)
 
 
-def safe_print(line: str):
-    """In transcript: xoa dong amp hien tai truoc, giu lock trong khi in."""
-    with _print_lock:
-        print(f"\r{' ' * 60}\r", end="", flush=True)
-        print(line)
+def _clear():
+    sys.stdout.write(f"\r{' ' * 85}\r")
+    sys.stdout.flush()
 
 
-# ── Log file ──────────────────────────────────────────────────────────────────
-def init_log():
+def sprint(line: str):
+    with _lock:
+        _clear()
+        print(line, flush=True)
+
+
+def init_log(thresh: float):
+    dev = f"GPU:{torch.cuda.get_device_name(0)}" if USE_GPU else "CPU"
     with open(LOG_FILE, "w", encoding="utf-8") as f:
         f.write(f"BUOI HOC : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Model    : Whisper {WHISPER_MODEL}  |  Ngon ngu: {LANGUAGE}\n")
-        f.write(f"GPU/fp16 : {USE_FP16}\n")
-        f.write("=" * 55 + "\n\n")
-    print(f"  Log -> {C.CYAN}{LOG_FILE}{C.RESET}")
+        f.write(f"Thiet bi : {dev}\n")
+        f.write(f"Nguong   : VAD={thresh:.5f}  no_speech<{NO_SPEECH_THRESH}  logprob>{LOGPROB_THRESH}\n")
+        f.write("=" * 60 + "\n\n")
+    sprint(f"  Log -> {C.CY}{LOG_FILE}{C.R}")
 
 
-def append_log(ts: str, text: str):
+def log(ts: str, text: str):
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"[{ts}] {text}\n")
 
 
-# ── STT Worker ────────────────────────────────────────────────────────────────
-_audio_q: "queue.Queue[np.ndarray | None]" = queue.Queue(maxsize=MAX_QUEUE_SIZE)
-_recent_texts: "collections.deque[str]" = collections.deque(maxlen=CONTEXT_WINDOW)
+def calibrate() -> float:
+    if FORCE_THRESH is not None:
+        sprint(f"  VAD nguong (tu .env): {C.YL}{FORCE_THRESH:.5f}{C.R}")
+        return FORCE_THRESH
+    sprint(f"{C.YL}[Cal] Giu im lang {CALIBRATE_SEC:.0f}s...{C.R}")
+    buf = sd.rec(int(SAMPLE_RATE * CALIBRATE_SEC),
+                 samplerate=SAMPLE_RATE, channels=1, dtype="float32")
+    sd.wait()
+    rms    = float(np.sqrt(np.mean(buf ** 2)))
+    thresh = max(0.002, round(rms * 3.5, 5))
+    sprint(f"  noise rms={rms:.5f}  ->  VAD nguong={C.GR}{thresh:.5f}{C.R}")
+    return thresh
 
 
-def stt_worker(model: whisper.Whisper):
+# ── STT worker ────────────────────────────────────────────────────────────────
+def stt_worker(model):
+    sprint(f"{C.GR}[Worker] san sang{C.R}")
     while True:
-        audio = _audio_q.get()
+        try:
+            audio = _audio_q.get(timeout=1)
+        except queue.Empty:
+            if _stop.is_set():
+                break
+            continue
+
         if audio is None:
+            _audio_q.task_done()
             break
 
-        prompt = " ".join(_recent_texts) if _recent_texts else None
+        try:
+            dur = len(audio) / SAMPLE_RATE
+            prompt = " ".join(_recent) if _recent else None
 
-        result = model.transcribe(
-            audio.astype(np.float32),
-            language=None if LANGUAGE == "auto" else LANGUAGE,
-            fp16=USE_FP16,
-            condition_on_previous_text=False,
-            initial_prompt=prompt,
-        )
-        text = result["text"].strip()
+            res = model.transcribe(
+                audio.astype(np.float32),
+                language=None if LANGUAGE == "auto" else LANGUAGE,
+                fp16=USE_FP16,
+                condition_on_previous_text=False,
+                initial_prompt=prompt,
+                beam_size=BEAM_SIZE,
+                best_of=BEAM_SIZE,
+                temperature=[0.0, 0.2, 0.4],
+            )
 
-        if text.lower() not in SKIP and len(text) >= 2:
-            _recent_texts.append(text)
-            ts = datetime.now().strftime("%H:%M:%S")
-            _amp_suppress.set()
-            safe_print(f"{C.CYAN}[{ts}]{C.RESET} {text}")
-            _amp_suppress.clear()
-            append_log(ts, text)
+            text = res["text"].strip()
 
-        _audio_q.task_done()
+            # ── Lay confidence metrics tu segments ───────────────────────────
+            segs = res.get("segments", [])
+            if segs:
+                avg_no_speech = np.mean([s.get("no_speech_prob", 0) for s in segs])
+                avg_logprob   = np.mean([s.get("avg_logprob", 0)    for s in segs])
+            else:
+                avg_no_speech = 1.0
+                avg_logprob   = -2.0
+
+            # DEBUG: hien thi day du de chon nguong
+            sprint(
+                f"{C.YL}[DBG]{C.R} "
+                f"dur={dur:.1f}s  "
+                f"no_speech={C.YL}{avg_no_speech:.2f}{C.R}  "
+                f"logprob={C.CY}{avg_logprob:.2f}{C.R}  "
+                f"text={repr(text[:60])}"
+            )
+
+            # ── Filter ───────────────────────────────────────────────────────
+            reason = None
+            if not text or len(text) < 2:
+                reason = "too short"
+            elif avg_no_speech > NO_SPEECH_THRESH:
+                reason = f"no_speech={avg_no_speech:.2f} > {NO_SPEECH_THRESH}"
+            elif avg_logprob < LOGPROB_THRESH:
+                reason = f"logprob={avg_logprob:.2f} < {LOGPROB_THRESH}"
+            elif any(h in text.lower() for h in HALLUC_STRINGS):
+                reason = "hallucination string"
+
+            if reason:
+                sprint(f"{C.GY}[SKIP] {reason}{C.R}")
+            else:
+                _recent.append(text)
+                ts = datetime.now().strftime("%H:%M:%S")
+
+                # In tung ky tu
+                _suppress.set()
+                with _lock:
+                    _clear()
+                    sys.stdout.write(f"{C.CY}[{ts}]{C.R} ")
+                    for ch in text:
+                        sys.stdout.write(ch)
+                        sys.stdout.flush()
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                _suppress.clear()
+
+                log(ts, text)
+
+        except Exception as e:
+            sprint(f"{C.RD}[ERR] {e}{C.R}")
+        finally:
+            _audio_q.task_done()
 
 
-# ── Audio Callback ────────────────────────────────────────────────────────────
-def make_callback():
-    """
-    FIX: Toan bo trang thai (buf, counters) duoc bao ve bang 1 lock rieng
-    de tranh race condition voi queue.put() va buf.clear().
-    """
-    _cb_lock  = threading.Lock()
-    buf       = []
-    silent    = [0]
-    speech    = [0]
-    _energy_history: "collections.deque[float]" = collections.deque(
-        maxlen=ENERGY_SMOOTH, iterable=[0.0] * ENERGY_SMOOTH
-    )
+# ── Audio callback ────────────────────────────────────────────────────────────
+def make_callback(thresh: float):
+    buf    = []
+    silent = [0]
+    speech = [0]
+    peak   = [0.0]
+    hist   = collections.deque([0.0] * RMS_SMOOTH, maxlen=RMS_SMOOTH)
 
-    SBLOCKS = max(1, int(SILENCE_SEC    / 0.05))
-    MBLOCKS = max(1, int(MIN_SPEECH_SEC / 0.05))
+    SBLK = max(1, int(SILENCE_SEC    / 0.05))
+    MBLK = max(1, int(MIN_SPEECH_SEC / 0.05))
 
     def cb(indata, frames, t, status):
         chunk = indata[:, 0].copy()
-        raw_amp = float(np.abs(chunk).mean())
+        hist.append(float(np.sqrt(np.mean(chunk ** 2))))
+        rms = float(np.mean(hist))
 
-        _energy_history.append(raw_amp)
-        amp = float(np.mean(_energy_history))
+        peak[0] = rms if rms > peak[0] else peak[0] * 0.997
+        is_sp   = rms > thresh
+        seg     = None
 
-        is_speech = amp > SILENCE_THRESH
+        if is_sp:
+            speech[0] += 1; silent[0] = 0; buf.append(chunk)
+        elif speech[0] > 0:
+            silent[0] += 1; buf.append(chunk)
+            if silent[0] >= SBLK:
+                if speech[0] >= MBLK and buf:
+                    seg = np.concatenate(buf)
+                buf.clear(); silent[0] = 0; speech[0] = 0
 
-        segment_to_enqueue = None
-
-        with _cb_lock:
-            if is_speech:
-                speech[0] += 1
-                silent[0]  = 0
-                buf.append(chunk)
-            elif speech[0] > 0:
-                silent[0] += 1
-                buf.append(chunk)
-                if silent[0] >= SBLOCKS:
-                    if speech[0] >= MBLOCKS and buf:
-                        segment_to_enqueue = np.concatenate(buf)
-                    buf.clear()
-                    silent[0] = 0
-                    speech[0] = 0
-
-        if segment_to_enqueue is not None:
+        if seg is not None:
             try:
-                _audio_q.put_nowait(segment_to_enqueue)
-            except queue.Full:
-                if _print_lock.acquire(blocking=False):
+                _audio_q.put_nowait(seg)
+                if _lock.acquire(blocking=False):
                     try:
-                        print(f"\r{C.RED}[!] Queue day ({MAX_QUEUE_SIZE}), bo qua segment{C.RESET}",
+                        _clear()
+                        print(f"  {C.GR}[SEG] {len(seg)/SAMPLE_RATE:.1f}s -> queue{C.R}",
                               flush=True)
                     finally:
-                        _print_lock.release()
+                        _lock.release()
+            except queue.Full:
+                sprint(f"{C.RD}[!] queue day{C.R}")
 
-        if not _amp_suppress.is_set():
-            bars  = min(int(amp * 500), 35)
-            color = C.GREEN if is_speech else C.GRAY
-            q_sz  = _audio_q.qsize()
-            wait  = f" {C.YELLOW}(xu ly: {q_sz}/{MAX_QUEUE_SIZE}){C.RESET}" if q_sz else ""
-            if _print_lock.acquire(blocking=False):
-                try:
-                    print(
-                        f"\r  {color}{'█' * bars:<35}{C.RESET} {amp:.4f}{wait}",
-                        end="", flush=True,
-                    )
-                finally:
-                    _print_lock.release()
+        if not _suppress.is_set() and _lock.acquire(blocking=False):
+            try:
+                bars = min(int(rms * 1000), 30)
+                col  = C.GR if is_sp else C.GY
+                sys.stdout.write(
+                    f"\r  {col}{'█'*bars:<30}{C.R}"
+                    f" rms={C.BOLD}{rms:.5f}{C.R}"
+                    f" peak={C.YL}{peak[0]:.5f}{C.R}"
+                    f" thr={C.CY}{thresh:.5f}{C.R}"
+                    f" sp={speech[0]:03d} si={silent[0]:02d}"
+                    + (f" {C.YL}q={_audio_q.qsize()}{C.R}" if _audio_q.qsize() else "")
+                )
+                sys.stdout.flush()
+            finally:
+                _lock.release()
 
     return cb
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    device_info = "GPU (fp16)" if USE_FP16 else "CPU"
-    print(f"""
-{C.CYAN}{C.BOLD}  Lecture Transcriber  (100% Local)
-  Whisper : {WHISPER_MODEL}  |  Ngon ngu: {LANGUAGE}
-  Thiet bi: {device_info}
-  Nhan Enter de dung va luu{C.RESET}
-""")
+    dev = f"GPU:{torch.cuda.get_device_name(0)}" if USE_GPU else "CPU"
+    print(f"\n{C.CY}{C.BOLD}  Lecture Transcriber v6"
+          f"\n  Model:{WHISPER_MODEL}  Lang:{LANGUAGE}  Device:{dev}"
+          f"\n  Nhan Enter de dung{C.R}\n")
 
-    init_log()
+    thresh = calibrate()
+    init_log(thresh)
 
-    print(f"\n{C.YELLOW}Dang tai Whisper ({WHISPER_MODEL})...{C.RESET}", flush=True)
-    model = whisper.load_model(WHISPER_MODEL)
-    print(f"{C.GREEN}San sang. Bat dau nghe...{C.RESET}\n")
+    print(f"{C.YL}Dang tai Whisper {WHISPER_MODEL}...{C.R}", flush=True)
+    model = whisper.load_model(WHISPER_MODEL, device="cuda" if USE_GPU else "cpu")
+    print(f"{C.GR}OK — Noi gi do, xem [DBG] no_speech va logprob.{C.R}")
+    print(f"{C.DIM}  Ghi khi: no_speech < {NO_SPEECH_THRESH}  va  logprob > {LOGPROB_THRESH}{C.R}\n")
 
-    worker = threading.Thread(target=stt_worker, args=(model,), daemon=True)
+    worker = threading.Thread(target=stt_worker, args=(model,), daemon=False)
     worker.start()
 
-    print(f"{C.YELLOW}  Nhan Enter de dung va luu...{C.RESET}\n")
-    with sd.InputStream(
-        samplerate=SAMPLE_RATE,
-        channels=1,
-        dtype="float32",
-        blocksize=int(SAMPLE_RATE * 0.05),
-        callback=make_callback(),
-    ):
-        input()
-    print(f"\n{C.YELLOW}Dang xu ly phan con lai...{C.RESET}")
-    _audio_q.put(None)
-    worker.join(timeout=30)
+    threading.Thread(target=lambda: (input(), _stop.set()), daemon=True).start()
 
-    print(f"{C.GREEN}Da luu: {LOG_FILE}{C.RESET}\n")
+    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+                        blocksize=int(SAMPLE_RATE * 0.05),
+                        callback=make_callback(thresh)):
+        while not _stop.is_set():
+            time.sleep(0.05)
+
+    print(f"\n{C.YL}Dung. Cho xu ly xong...{C.R}")
+    _audio_q.put(None)
+    worker.join(timeout=120)
+    print(f"{C.GR}Da luu: {LOG_FILE}{C.R}\n")
 
 
 if __name__ == "__main__":
