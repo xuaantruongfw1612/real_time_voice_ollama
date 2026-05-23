@@ -17,7 +17,7 @@ def check_imports():
         try: __import__(imp)
         except ImportError: missing.append(pkg)
     if missing:
-        print(f"Thieu: pip install {' '.join(missing)}")
+        print(f"Thiếu: pip install {' '.join(missing)}")
         sys.exit(1)
 
 check_imports()
@@ -103,21 +103,21 @@ def log(ts: str, text: str):
 
 def calibrate() -> float:
     if FORCE_THRESH is not None:
-        sprint(f"  VAD nguong (tu .env): {C.YL}{FORCE_THRESH:.5f}{C.R}")
+        sprint(f"  VAD ngưỡng (tu .env): {C.YL}{FORCE_THRESH:.5f}{C.R}")
         return FORCE_THRESH
-    sprint(f"{C.YL}[Cal] Giu im lang {CALIBRATE_SEC:.0f}s...{C.R}")
+    sprint(f"{C.YL}[Cal] Giữ im lặng {CALIBRATE_SEC:.0f}s...{C.R}")
     buf = sd.rec(int(SAMPLE_RATE * CALIBRATE_SEC),
                  samplerate=SAMPLE_RATE, channels=1, dtype="float32")
     sd.wait()
     rms    = float(np.sqrt(np.mean(buf ** 2)))
     thresh = max(0.002, round(rms * 3.5, 5))
-    sprint(f"  noise rms={rms:.5f}  ->  VAD nguong={C.GR}{thresh:.5f}{C.R}")
+    sprint(f"  noise rms={rms:.5f}  ->  VAD ngưỡng={C.GR}{thresh:.5f}{C.R}")
     return thresh
 
 
 # ── STT worker ────────────────────────────────────────────────────────────────
 def stt_worker(model):
-    sprint(f"{C.GR}[Worker] san sang{C.R}")
+    sprint(f"{C.GR}[Worker] sẵn sàng{C.R}")
     while True:
         try:
             audio = _audio_q.get(timeout=1)
@@ -166,15 +166,15 @@ def stt_worker(model):
             )
 
             # ── Filter ───────────────────────────────────────────────────────
+            # Không dùng no_speech/logprob làm ngưỡng cứng vì không đáng tin
+            # với tiếng Việt / giọng nhỏ / CPU — chỉ skip khi chắc chắn noise
             reason = None
             if not text or len(text) < 2:
                 reason = "too short"
-            elif avg_no_speech > NO_SPEECH_THRESH:
-                reason = f"no_speech={avg_no_speech:.2f} > {NO_SPEECH_THRESH}"
-            elif avg_logprob < LOGPROB_THRESH:
-                reason = f"logprob={avg_logprob:.2f} < {LOGPROB_THRESH}"
             elif any(h in text.lower() for h in HALLUC_STRINGS):
                 reason = "hallucination string"
+            elif avg_no_speech > 0.95 and avg_logprob < -1.5:
+                reason = f"noise ro: no_speech={avg_no_speech:.2f} logprob={avg_logprob:.2f}"
 
             if reason:
                 sprint(f"{C.GY}[SKIP] {reason}{C.R}")
