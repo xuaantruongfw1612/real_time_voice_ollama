@@ -28,12 +28,12 @@ import whisper
 import torch
 
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-ROOT_DIR = Path(__file__).parent.parent   # VOICE_REAL_TIME/
+# Paths
+ROOT_DIR = Path(__file__).parent.parent
 LOG_DIR  = ROOT_DIR / "lecture"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# Config
 WHISPER_MODEL  = os.getenv("WHISPER_MODEL",  "medium")
 SAMPLE_RATE    = int(os.getenv("SAMPLE_RATE", "16000"))
 LANGUAGE       = os.getenv("LANGUAGE", "vi")
@@ -121,7 +121,7 @@ def calibrate() -> float:
     return thresh
 
 
-# ── STT worker ────────────────────────────────────────────────────────────────
+# STT worker
 def stt_worker(model):
     sprint(f"{C.GR}[Worker] sẵn sàng{C.R}")
     while True:
@@ -154,7 +154,7 @@ def stt_worker(model):
 
             text = res["text"].strip()
 
-            # ── Lay confidence metrics tu segments ───────────────────────────
+            # Lay confidence metrics tu segments
             segs = res.get("segments", [])
             if segs:
                 avg_no_speech = np.mean([s.get("no_speech_prob", 0) for s in segs])
@@ -209,7 +209,7 @@ def stt_worker(model):
             _audio_q.task_done()
 
 
-# ── Audio callback ────────────────────────────────────────────────────────────
+# Audio callback
 def make_callback(thresh: float):
     buf    = []
     silent = [0]
@@ -270,7 +270,7 @@ def make_callback(thresh: float):
     return cb
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# Main
 def main():
     dev = f"GPU:{torch.cuda.get_device_name(0)}" if USE_GPU else "CPU"
     print(f"\n{C.CY}{C.BOLD}  Lecture Transcriber"
@@ -296,7 +296,7 @@ def main():
         while not _stop.is_set():
             time.sleep(0.05)
 
-    print(f"\n{C.YL}Đừng, chờ xử lý xong...{C.R}")
+    print(f"\n{C.YL}Dừng, chờ xử lý xong...{C.R}")
     _audio_q.put(None)
     worker.join(timeout=120)
     print(f"{C.GR}Đã lưu: {LOG_FILE}{C.R}\n")

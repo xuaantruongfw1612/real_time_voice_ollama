@@ -18,11 +18,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Paths ───────────────────────────────────────────────────────────────────
+# Paths
 ROOT_DIR  = Path(__file__).parent.parent   # VOICE_REAL_TIME/
 LOG_DIR   = ROOT_DIR / "lecture"
 
-# ── Config ─────────────────────────────────────────────────────────────────
+# Config
 OLLAMA_MODEL   = os.getenv("OLLAMA_MODEL",   "gemma3:4b")
 OLLAMA_URL     = os.getenv("OLLAMA_URL",     "http://localhost:11434")
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "120"))
@@ -36,7 +36,7 @@ class C:
     RD="\033[91m"; GY="\033[90m"
 
 
-# ── Từ điển tích lũy ────────────────────────────────────────────────────────
+# Từ điển tích lũy
 def load_dict() -> dict[str, str]:
     """Đọc dictionary.txt → {sai: đúng}"""
     d = {}
@@ -81,7 +81,7 @@ def merge_new_words(d: dict[str, str], new_words: list[dict]) -> tuple[dict, int
     return d, added
 
 
-# ── Ollama server ───────────────────────────────────────────────────────────
+# Ollama server
 def is_ollama_running() -> bool:
     try:
         return requests.get(OLLAMA_URL, timeout=2).status_code == 200
@@ -127,7 +127,7 @@ def pull_model_if_needed(model: str):
         sys.exit(1)
 
 
-# ── Polish ──────────────────────────────────────────────────────────────────
+# Polish
 def build_system_prompt(d: dict[str, str]) -> str:
     base = (
         "Bạn là trợ lý chỉnh sửa văn bản tiếng Việt được phiên âm từ giọng nói.\n"
@@ -197,7 +197,7 @@ def polish_line(raw: str, d: dict[str, str]) -> tuple[str, list[dict]]:
         return pre, []
 
 
-# ── File log ────────────────────────────────────────────────────────────────
+# File log
 def find_latest_log() -> Path | None:
     # bỏ qua file _polished để không đọc nhầm
     logs = sorted(
@@ -237,7 +237,7 @@ def save_polished(original: Path, header: list[str], polished: list[tuple[str, s
     return out
 
 
-# ── Main ────────────────────────────────────────────────────────────────────
+# Main
 def main():
     print(f"\n{C.CY}{C.BOLD}  Polish — Ollama text fixer (với từ điển tích lũy){C.R}")
     print(f"  Model: {C.YL}{OLLAMA_MODEL}{C.R}\n")
